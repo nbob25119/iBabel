@@ -163,17 +163,18 @@ class Debouncer:
         async def delayed():
             await asyncio.sleep(self.delay)
             await coro
-            del self.pending[key]
+            if key in self.pending:
+                del self.pending[key]
         
         self.pending[key] = asyncio.create_task(delayed())
 
 debouncer = Debouncer(delay=1.5)
 
 # ===============================================
-# CIRCUIT BREAKER
+# CIRCUIT BREAKER (SIMPLIFIED)
 # ===============================================
 class CircuitBreaker:
-    def __init__(self, failure_threshold=5, timeout=60):
+    def __init__(self, failure_threshold=3, timeout=30):
         self.failure_threshold = failure_threshold
         self.timeout = timeout
         self.failures = defaultdict(int)
@@ -185,20 +186,24 @@ class CircuitBreaker:
         self.last_failure[api_url] = time.time()
         
         if self.failures[api_url] >= self.failure_threshold:
-            self.open_circuits.add(api_url)
-            print(f"🔴 Circuit breaker opened for {api_url}")
+            if api_url not in self.open_circuits:
+                self.open_circuits.add(api_url)
+                print(f"🔴 Circuit opened: {api_url}")
     
     def record_success(self, api_url):
+        if self.failures[api_url] > 0 or api_url in self.open_circuits:
+            print(f"🟢 Circuit closed: {api_url}")
         self.failures[api_url] = 0
         if api_url in self.open_circuits:
             self.open_circuits.remove(api_url)
-            print(f"🟢 Circuit breaker closed for {api_url}")
     
     def can_request(self, api_url):
         if api_url not in self.open_circuits:
             return True
         
+        # Auto-reset after timeout
         if time.time() - self.last_failure[api_url] > self.timeout:
+            print(f"⚡ Circuit auto-reset: {api_url}")
             self.open_circuits.remove(api_url)
             self.failures[api_url] = 0
             return True
@@ -255,18 +260,26 @@ FLAG_TO_LANG = {
 }
 
 # ===============================================
-# TRANSLATION FUNCTION (OPTIMIZED)
+# TRANSLATION FUNCTION (FIXED)
 # ===============================================
 async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
+    # Check cache first
     cached = cache.get(text, target_lang)
     if cached:
         return cached
     
+    # Create session if needed
     if session is None:
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        session = aiohttp.ClientSession(timeout=timeout)
+        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
+        session = aiohttp.ClientSession(
+            timeout=timeout,
+            headers={
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0'
+            }
+        )
     
     payload = {
         "q": text,
@@ -275,36 +288,66 @@ async def translate_text(text: str, target_lang: str, source_lang: str = 'auto')
         "format": "text"
     }
     
+    last_error = None
+    
+    # Try each API
     for api_url in FALLBACK_APIS:
+        # Skip if circuit is open
         if not circuit_breaker.can_request(api_url):
+            print(f"⚠️ Skipping {api_url} (circuit open)")
             continue
         
         try:
+            print(f"🔄 Trying API: {api_url}")
+            
             async with session.post(api_url, json=payload) as response:
+                print(f"📡 Response status: {response.status}")
+                
                 if response.status == 200:
                     data = await response.json()
+                    translated = data.get('translatedText', text)
+                    
                     result = {
-                        'text': data.get('translatedText', text),
+                        'text': translated,
                         'source': source_lang if source_lang != 'auto' else 'auto'
                     }
                     
+                    # Cache and mark success
                     cache.set(text, target_lang, result)
                     circuit_breaker.record_success(api_url)
                     
+                    print(f"✅ Translation successful via {api_url}")
                     return result
+                    
                 elif response.status == 429:
+                    print(f"⚠️ Rate limited by {api_url}")
                     circuit_breaker.record_failure(api_url)
-                    await asyncio.sleep(2)
-                    continue
+                    last_error = "Rate limited"
+                    await asyncio.sleep(1)
+                    
+                else:
+                    error_text = await response.text()
+                    print(f"❌ API error {response.status}: {error_text[:200]}")
+                    circuit_breaker.record_failure(api_url)
+                    last_error = f"HTTP {response.status}"
                     
         except asyncio.TimeoutError:
+            print(f"⏱️ Timeout: {api_url}")
             circuit_breaker.record_failure(api_url)
-            continue
+            last_error = "Timeout"
+            
+        except aiohttp.ClientError as e:
+            print(f"🔌 Connection error {api_url}: {str(e)[:100]}")
+            circuit_breaker.record_failure(api_url)
+            last_error = f"Connection: {str(e)[:50]}"
+            
         except Exception as e:
+            print(f"💥 Unexpected error {api_url}: {str(e)[:100]}")
             circuit_breaker.record_failure(api_url)
-            print(f"⚠️ API {api_url} error: {e}")
-            continue
+            last_error = f"Error: {str(e)[:50]}"
     
+    # All APIs failed
+    print(f"❌ All APIs failed. Last error: {last_error}")
     return None
 
 # ===============================================
@@ -386,8 +429,8 @@ async def on_reaction_add(reaction, user):
             
             if not result:
                 await message.channel.send(
-                    f"❌ {user.mention} Translation failed! APIs busy.",
-                    delete_after=5
+                    f"❌ {user.mention} Translation failed! All APIs unavailable.",
+                    delete_after=8
                 )
                 return
             
@@ -404,7 +447,6 @@ async def on_reaction_add(reaction, user):
             
             embed.set_footer(text=footer_text, icon_url=user.display_avatar.url)
             
-            # Reply to original message instead of sending new message
             translation_msg = await message.reply(embed=embed, mention_author=False)
             
             settings["total_translations"] += 1
@@ -447,7 +489,7 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         result = await translate_text(text, lang)
         
         if not result:
-            await ctx.send("❌ Translation failed!")
+            await ctx.send("❌ Translation failed! Please try again later.")
             return
         
         embed = discord.Embed(
@@ -645,6 +687,34 @@ async def stats_command(ctx):
     embed.add_field(name="📊 Server translations", value=settings['total_translations'], inline=True)
     
     await ctx.send(embed=embed)
+
+@bot.command(name='apitest')
+@commands.has_permissions(administrator=True)
+async def api_test(ctx):
+    """Test API connectivity"""
+    embed = discord.Embed(title="🔧 API Test", color=discord.Color.blue())
+    
+    test_text = "Hello"
+    test_lang = "vi"
+    
+    for api_url in FALLBACK_APIS:
+        status = "🟢" if circuit_breaker.can_request(api_url) else "🔴"
+        failures = circuit_breaker.failures.get(api_url, 0)
+        embed.add_field(
+            name=f"{status} {api_url.split('//')[1].split('/')[0]}",
+            value=f"Failures: {failures}",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+    
+    # Try translation
+    async with ctx.typing():
+        result = await translate_text(test_text, test_lang)
+        if result:
+            await ctx.send(f"✅ Test successful: `{test_text}` → `{result['text']}`")
+        else:
+            await ctx.send("❌ Test failed - check logs")
 
 @bot.event
 async def on_command_error(ctx, error):
