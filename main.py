@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import hashlib
 import time
-import json
 
 # ===============================================
 # IMPORT KEEP-ALIVE
@@ -30,7 +29,7 @@ bot = commands.Bot(
     command_prefix='!',
     intents=intents,
     help_command=None,
-    max_messages=500,  # Reduced for free tier
+    max_messages=1000,
     chunk_guilds_at_startup=False
 )
 
@@ -74,7 +73,7 @@ global_limiter = RateLimiter(max_requests=200, window=60)
 # TRANSLATION CACHE
 # ===============================================
 class TranslationCache:
-    def __init__(self, max_size=500, ttl=3600):  # Reduced for free tier
+    def __init__(self, max_size=1000, ttl=3600):
         self.cache = {}
         self.access_times = {}
         self.max_size = max_size
@@ -114,7 +113,7 @@ cache = TranslationCache()
 # REQUEST QUEUE
 # ===============================================
 class TranslationQueue:
-    def __init__(self, max_concurrent=3):  # Reduced for free tier
+    def __init__(self, max_concurrent=5):
         self.queue = asyncio.Queue()
         self.processing = 0
         self.max_concurrent = max_concurrent
@@ -147,7 +146,7 @@ class TranslationQueue:
             for _ in range(self.max_concurrent):
                 asyncio.create_task(self.worker())
 
-translation_queue = TranslationQueue(max_concurrent=3)
+translation_queue = TranslationQueue(max_concurrent=5)
 
 # ===============================================
 # DEBOUNCING
@@ -164,8 +163,7 @@ class Debouncer:
         async def delayed():
             await asyncio.sleep(self.delay)
             await coro
-            if key in self.pending:
-                del self.pending[key]
+            del self.pending[key]
         
         self.pending[key] = asyncio.create_task(delayed())
 
@@ -175,7 +173,7 @@ debouncer = Debouncer(delay=1.5)
 # CIRCUIT BREAKER
 # ===============================================
 class CircuitBreaker:
-    def __init__(self, failure_threshold=3, timeout=30):  # More aggressive for free APIs
+    def __init__(self, failure_threshold=5, timeout=60):
         self.failure_threshold = failure_threshold
         self.timeout = timeout
         self.failures = defaultdict(int)
@@ -210,178 +208,15 @@ class CircuitBreaker:
 circuit_breaker = CircuitBreaker()
 
 # ===============================================
-# MULTI-API TRANSLATION WITH FALLBACKS
+# API CONFIG
 # ===============================================
+FALLBACK_APIS = [
+    "https://libretranslate.com/translate",
+    "https://translate.argosopentech.com/translate",
+    "https://translate.terraprint.co/translate"
+]
+
 session = None
-
-# MyMemory API - Free, stable, no API key needed
-async def translate_mymemory(text: str, target_lang: str, source_lang: str = 'auto'):
-    global session
-    
-    try:
-        url = "https://api.mymemory.translated.net/get"
-        params = {
-            "q": text[:500],  # Limit to 500 chars
-            "langpair": f"{source_lang}|{target_lang}"
-        }
-        
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get('responseStatus') == 200:
-                    return {
-                        'text': data['responseData']['translatedText'],
-                        'source': source_lang,
-                        'api': 'MyMemory'
-                    }
-    except Exception as e:
-        print(f"MyMemory error: {e}")
-    return None
-
-# LibreTranslate - Multiple free instances
-async def translate_libretranslate(text: str, target_lang: str, source_lang: str = 'auto', instance_url: str = None):
-    global session
-    
-    instances = [
-        "https://translate.astian.org/translate",
-        "https://translate.fedilab.app/translate",
-        "https://translate.argosopentech.com/translate",
-    ] if not instance_url else [instance_url]
-    
-    for url in instances:
-        if not circuit_breaker.can_request(url):
-            continue
-            
-        try:
-            payload = {
-                "q": text,
-                "source": source_lang,
-                "target": target_lang,
-                "format": "text"
-            }
-            
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    circuit_breaker.record_success(url)
-                    return {
-                        'text': data.get('translatedText', text),
-                        'source': source_lang,
-                        'api': 'LibreTranslate'
-                    }
-                elif response.status == 429:
-                    circuit_breaker.record_failure(url)
-                    continue
-                    
-        except asyncio.TimeoutError:
-            circuit_breaker.record_failure(url)
-            continue
-        except Exception as e:
-            circuit_breaker.record_failure(url)
-            continue
-    
-    return None
-
-# Lingva Translate - Free, no API key
-async def translate_lingva(text: str, target_lang: str, source_lang: str = 'auto'):
-    global session
-    
-    instances = [
-        "https://lingva.ml/api/v1",
-        "https://translate.plausibility.cloud/api/v1",
-    ]
-    
-    for base_url in instances:
-        if not circuit_breaker.can_request(base_url):
-            continue
-            
-        try:
-            url = f"{base_url}/{source_lang}/{target_lang}/{text[:500]}"
-            
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    circuit_breaker.record_success(base_url)
-                    return {
-                        'text': data.get('translation', text),
-                        'source': source_lang,
-                        'api': 'Lingva'
-                    }
-        except Exception as e:
-            circuit_breaker.record_failure(base_url)
-            continue
-    
-    return None
-
-# SimplytTranslate - Free alternative
-async def translate_simplytranslate(text: str, target_lang: str, source_lang: str = 'auto'):
-    global session
-    
-    instances = [
-        "https://simplytranslate.org/api/translate",
-    ]
-    
-    for url in instances:
-        if not circuit_breaker.can_request(url):
-            continue
-            
-        try:
-            params = {
-                "engine": "google",
-                "text": text[:500],
-                "sl": source_lang,
-                "tl": target_lang
-            }
-            
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    circuit_breaker.record_success(url)
-                    return {
-                        'text': data.get('translated-text', text),
-                        'source': source_lang,
-                        'api': 'SimplyTranslate'
-                    }
-        except Exception as e:
-            circuit_breaker.record_failure(url)
-            continue
-    
-    return None
-
-# Main translation function with cascading fallbacks
-async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
-    global session
-    
-    # Check cache first
-    cached = cache.get(text, target_lang)
-    if cached:
-        return cached
-    
-    # Initialize session if needed
-    if session is None:
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
-        session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-    
-    # Try APIs in order of reliability
-    translation_functions = [
-        translate_mymemory,
-        translate_lingva,
-        translate_libretranslate,
-        translate_simplytranslate,
-    ]
-    
-    for translate_func in translation_functions:
-        try:
-            result = await translate_func(text, target_lang, source_lang)
-            if result and result['text'] and result['text'] != text:
-                cache.set(text, target_lang, result)
-                return result
-        except Exception as e:
-            print(f"Translation function {translate_func.__name__} error: {e}")
-            continue
-    
-    return None
 
 # ===============================================
 # SERVER SETTINGS
@@ -395,7 +230,7 @@ def get_server_settings(guild_id):
             "delete_time": 30,
             "total_translations": 0,
             "enabled": True,
-            "max_length": 1000  # Reduced for better performance
+            "max_length": 2000
         }
     return server_settings[guild_id]
 
@@ -420,6 +255,59 @@ FLAG_TO_LANG = {
 }
 
 # ===============================================
+# TRANSLATION FUNCTION (OPTIMIZED)
+# ===============================================
+async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
+    global session
+    
+    cached = cache.get(text, target_lang)
+    if cached:
+        return cached
+    
+    if session is None:
+        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        session = aiohttp.ClientSession(timeout=timeout)
+    
+    payload = {
+        "q": text,
+        "source": source_lang,
+        "target": target_lang,
+        "format": "text"
+    }
+    
+    for api_url in FALLBACK_APIS:
+        if not circuit_breaker.can_request(api_url):
+            continue
+        
+        try:
+            async with session.post(api_url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    result = {
+                        'text': data.get('translatedText', text),
+                        'source': source_lang if source_lang != 'auto' else 'auto'
+                    }
+                    
+                    cache.set(text, target_lang, result)
+                    circuit_breaker.record_success(api_url)
+                    
+                    return result
+                elif response.status == 429:
+                    circuit_breaker.record_failure(api_url)
+                    await asyncio.sleep(2)
+                    continue
+                    
+        except asyncio.TimeoutError:
+            circuit_breaker.record_failure(api_url)
+            continue
+        except Exception as e:
+            circuit_breaker.record_failure(api_url)
+            print(f"⚠️ API {api_url} error: {e}")
+            continue
+    
+    return None
+
+# ===============================================
 # BOT EVENTS
 # ===============================================
 @bot.event
@@ -430,8 +318,8 @@ async def on_ready():
     print(f'📊 Servers: {len(bot.guilds)}')
     print(f'👥 Users: {sum(g.member_count for g in bot.guilds)}')
     print(f'🌍 Languages: {len(FLAG_TO_LANG)} flags')
-    print(f'🔧 Render Free Tier Optimized')
-    print(f'⚡ Multi-API: MyMemory + Lingva + LibreTranslate + SimplyTranslate')
+    print(f'🔧 Production Mode: Rate Limited + Queued + Cached')
+    print(f'⚡ Max: 50 req/min per server, 10 req/min per user')
     if KEEP_ALIVE_AVAILABLE:
         print('✅ Keep-Alive: ENABLED')
     print('=' * 70)
@@ -498,8 +386,8 @@ async def on_reaction_add(reaction, user):
             
             if not result:
                 await message.channel.send(
-                    f"❌ {user.mention} Translation failed! All APIs unavailable. Please try again.",
-                    delete_after=8
+                    f"❌ {user.mention} Translation failed! APIs busy.",
+                    delete_after=5
                 )
                 return
             
@@ -510,20 +398,14 @@ async def on_reaction_add(reaction, user):
                 timestamp=datetime.utcnow()
             )
             
-            if len(message.content) <= 300:
-                embed.add_field(
-                    name="📝 Original",
-                    value=f"```{message.content[:1000]}```",
-                    inline=False
-                )
-            
-            footer_text = f"By {user.name} • API: {result.get('api', 'Unknown')}"
+            footer_text = f"Requested by {user.name}"
             if settings["auto_delete"]:
                 footer_text += f" • ⏱️ {settings['delete_time']}s"
             
             embed.set_footer(text=footer_text, icon_url=user.display_avatar.url)
             
-            translation_msg = await message.channel.send(embed=embed)
+            # Reply to original message instead of sending new message
+            translation_msg = await message.reply(embed=embed, mention_author=False)
             
             settings["total_translations"] += 1
             
@@ -565,7 +447,7 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         result = await translate_text(text, lang)
         
         if not result:
-            await ctx.send("❌ Translation failed! All APIs unavailable.")
+            await ctx.send("❌ Translation failed!")
             return
         
         embed = discord.Embed(
@@ -577,8 +459,6 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         
         if len(text) <= 300:
             embed.add_field(name="📝 Original", value=f"```{text[:1000]}```", inline=False)
-        
-        embed.set_footer(text=f"API: {result.get('api', 'Unknown')}")
         
         await ctx.send(embed=embed)
 
@@ -633,8 +513,8 @@ async def max_length(ctx, length: int = None):
         await ctx.send(f"📏 Current max: **{settings['max_length']}** chars")
         return
     
-    if length < 100 or length > 2000:
-        await ctx.send("❌ Range: 100-2000")
+    if length < 100 or length > 3000:
+        await ctx.send("❌ Range: 100-3000")
         return
     
     settings["max_length"] = length
@@ -682,7 +562,7 @@ async def flags_list(ctx):
 async def help_command(ctx):
     embed = discord.Embed(
         title="🤖 Translation Bot Help",
-        description=f"Free APIs • {len(FLAG_TO_LANG)} languages • 24/7 uptime",
+        description=f"Production-ready • {len(FLAG_TO_LANG)} languages • Rate limited",
         color=discord.Color.blue()
     )
     
@@ -766,45 +646,6 @@ async def stats_command(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='apitest')
-async def api_test(ctx):
-    """Test all translation APIs"""
-    test_text = "Hello world"
-    test_lang = "vi"
-    
-    embed = discord.Embed(
-        title="🔧 API Status Test",
-        description=f"Testing: '{test_text}' → {test_lang}",
-        color=discord.Color.orange()
-    )
-    
-    async with ctx.typing():
-        # Test MyMemory
-        result1 = await translate_mymemory(test_text, test_lang)
-        status1 = "✅ OK" if result1 else "❌ FAIL"
-        
-        # Test Lingva
-        result2 = await translate_lingva(test_text, test_lang)
-        status2 = "✅ OK" if result2 else "❌ FAIL"
-        
-        # Test LibreTranslate
-        result3 = await translate_libretranslate(test_text, test_lang)
-        status3 = "✅ OK" if result3 else "❌ FAIL"
-        
-        # Test SimplyTranslate
-        result4 = await translate_simplytranslate(test_text, test_lang)
-        status4 = "✅ OK" if result4 else "❌ FAIL"
-        
-        embed.add_field(name="MyMemory", value=status1, inline=True)
-        embed.add_field(name="Lingva", value=status2, inline=True)
-        embed.add_field(name="LibreTranslate", value=status3, inline=True)
-        embed.add_field(name="SimplyTranslate", value=status4, inline=True)
-        
-        working_count = sum([bool(r) for r in [result1, result2, result3, result4]])
-        embed.set_footer(text=f"Working APIs: {working_count}/4")
-        
-    await ctx.send(embed=embed)
-
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
@@ -839,10 +680,9 @@ if __name__ == "__main__":
         print("=" * 70)
         exit(1)
     
-    print("🚀 Starting Translation Bot (Render Free Tier)")
-    print("⚡ Multi-API: MyMemory + Lingva + LibreTranslate + SimplyTranslate")
-    print("🔒 Protection: Rate limiting + Queue + Cache + Circuit Breaker")
-    print("💾 Optimized for 512MB RAM")
+    print("🚀 Starting Production Translation Bot...")
+    print("⚡ Features: Rate Limiting + Queue + Cache + Circuit Breaker")
+    print("🔒 Protection: 10 req/min/user, 50 req/min/server, 200 req/min/global")
     
     try:
         bot.run(TOKEN)
