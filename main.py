@@ -408,7 +408,7 @@ if __name__ == "__main__":
         keep_alive()
     
     # Lấy token
-    TOKEN = "os.getenv("DISCORD_TOKEN")"
+    TOKEN = os.getenv("DISCORD_TOKEN")
     
     if not TOKEN:
         print("=" * 70)
