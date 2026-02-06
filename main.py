@@ -1,53 +1,36 @@
-import discord 
+import discord
 from discord.ext import commands
-from flask import Flask
 import asyncio
 import aiohttp
 import os
 from datetime import datetime
 
-# ===============================================
-# IMPORT KEEP-ALIVE (cho Replit/Render/Glitch)
-# ===============================================
+# IMPORT KEEP-ALIVE
 try:
     from keep_alive import keep_alive
     KEEP_ALIVE_AVAILABLE = True
 except ImportError:
     KEEP_ALIVE_AVAILABLE = False
-    print("⚠️ keep_alive.py not found - bot sẽ không auto-restart")
 
-# ===============================================
-# CẤU HÌNH BOT
-# ===============================================
+# BOT CONFIG (TẮT help command mặc định)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.guilds = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# ===============================================
-# API DỊCH - LIBRETRANSLATE
-# ===============================================
-# Option 1: Public API (miễn phí, có rate limit)
-TRANSLATE_API = "https://libretranslate.com/translate"
-
-# Option 2: Fallback APIs (nếu API chính bị down)
+# TRANSLATION API
 FALLBACK_APIS = [
     "https://libretranslate.com/translate",
     "https://translate.argosopentech.com/translate",
     "https://translate.terraprint.co/translate"
 ]
-
-# Session cho async HTTP requests
 session = None
 
-# ===============================================
-# DATABASE CÀI ĐẶT SERVER
-# ===============================================
+# SERVER SETTINGS
 server_settings = {}
 
 def get_server_settings(guild_id):
-    """Lấy/tạo cài đặt cho server"""
     if guild_id not in server_settings:
         server_settings[guild_id] = {
             "auto_delete": True,
@@ -56,81 +39,42 @@ def get_server_settings(guild_id):
         }
     return server_settings[guild_id]
 
-# ===============================================
-# MAPPING FLAG → LANGUAGE CODE (70+ ngôn ngữ)
-# ===============================================
+# FLAG TO LANGUAGE MAPPING
 FLAG_TO_LANG = {
-    # Châu Á
     '🇻🇳': 'vi', '🇨🇳': 'zh', '🇯🇵': 'ja', '🇰🇷': 'ko', '🇹🇭': 'th',
     '🇮🇩': 'id', '🇵🇭': 'tl', '🇲🇾': 'ms', '🇸🇬': 'en', '🇮🇳': 'hi',
     '🇵🇰': 'ur', '🇧🇩': 'bn', '🇱🇰': 'si', '🇲🇲': 'my', '🇰🇭': 'km',
     '🇱🇦': 'lo', '🇹🇼': 'zh', '🇭🇰': 'zh', '🇲🇴': 'zh',
-    
-    # Châu Âu
     '🇬🇧': 'en', '🇺🇸': 'en', '🇫🇷': 'fr', '🇩🇪': 'de', '🇪🇸': 'es',
     '🇮🇹': 'it', '🇵🇹': 'pt', '🇷🇺': 'ru', '🇵🇱': 'pl', '🇳🇱': 'nl',
     '🇸🇪': 'sv', '🇳🇴': 'no', '🇩🇰': 'da', '🇫🇮': 'fi', '🇬🇷': 'el',
     '🇹🇷': 'tr', '🇨🇿': 'cs', '🇭🇺': 'hu', '🇷🇴': 'ro', '🇧🇬': 'bg',
-    '🇭🇷': 'hr', '🇸🇰': 'sk', '🇺🇦': 'uk',
-    
-    # Châu Mỹ
-    '🇧🇷': 'pt', '🇲🇽': 'es', '🇦🇷': 'es', '🇨🇱': 'es', '🇨🇴': 'es',
-    '🇵🇪': 'es', '🇨🇦': 'en',
-    
-    # Trung Đông
+    '🇭🇷': 'hr', '🇸🇰': 'sk', '🇺🇦': 'uk', '🇧🇷': 'pt', '🇲🇽': 'es',
+    '🇦🇷': 'es', '🇨🇱': 'es', '🇨🇴': 'es', '🇵🇪': 'es', '🇨🇦': 'en',
     '🇸🇦': 'ar', '🇦🇪': 'ar', '🇮🇷': 'fa', '🇮🇱': 'he', '🇪🇬': 'ar',
-    
-    # Châu Phi
-    '🇿🇦': 'af', '🇳🇬': 'en', '🇰🇪': 'sw',
-    
-    # Châu Đại Dương
-    '🇦🇺': 'en', '🇳🇿': 'en',
+    '🇿🇦': 'af', '🇳🇬': 'en', '🇰🇪': 'sw', '🇦🇺': 'en', '🇳🇿': 'en',
 }
 
-# ===============================================
-# HÀM DỊCH VĂN BẢN (CÓ FALLBACK)
-# ===============================================
-async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
-    """
-    Dịch văn bản với fallback API
-    Tự động thử API khác nếu API chính fail
-    """
+# TRANSLATE FUNCTION
+async def translate_text(text, target_lang, source_lang='auto'):
     global session
-    
     if session is None:
         session = aiohttp.ClientSession()
     
-    payload = {
-        "q": text,
-        "source": source_lang,
-        "target": target_lang,
-        "format": "text"
-    }
+    payload = {"q": text, "source": source_lang, "target": target_lang, "format": "text"}
     
-    # Thử từng API cho đến khi thành công
     for api_url in FALLBACK_APIS:
         try:
-            async with session.post(
-                api_url, 
-                json=payload, 
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
+            async with session.post(api_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return {
-                        'text': data.get('translatedText', text),
-                        'source': source_lang if source_lang != 'auto' else 'auto'
-                    }
+                    return {'text': data.get('translatedText', text), 'source': source_lang}
         except Exception as e:
-            print(f"⚠️ API {api_url} failed: {e}")
+            print(f"API {api_url} failed: {e}")
             continue
-    
-    # Tất cả APIs đều fail
     return None
 
-# ===============================================
 # EVENT: BOT READY
-# ===============================================
 @bot.event
 async def on_ready():
     print('=' * 70)
@@ -138,8 +82,7 @@ async def on_ready():
     print(f'🆔 ID: {bot.user.id}')
     print(f'📊 Servers: {len(bot.guilds)}')
     print(f'👥 Users: {sum(g.member_count for g in bot.guilds)}')
-    print(f'🌍 Languages: {len(FLAG_TO_LANG)} flags')
-    print(f'🔧 API: LibreTranslate (Multi-instance)')
+    print(f'🌍 Languages: {len(FLAG_TO_LANG)}')
     if KEEP_ALIVE_AVAILABLE:
         print('✅ Keep-Alive: ENABLED')
     print('=' * 70)
@@ -147,39 +90,27 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name=f"{len(FLAG_TO_LANG)} flags 🌐 | React to translate!"
+            name=f"{len(FLAG_TO_LANG)} flags 🌐 | !help"
         )
     )
 
-# ===============================================
-# EVENT: REACTION ADD (DỊCH TỰ ĐỘNG)
-# ===============================================
+# EVENT: REACTION ADD
 @bot.event
 async def on_reaction_add(reaction, user):
-    """Xử lý khi user react emoji flag vào tin nhắn"""
-    
     if user.bot:
         return
     
     emoji = str(reaction.emoji)
-    
     if emoji not in FLAG_TO_LANG:
         return
     
     message = reaction.message
-    
     if not message.content or message.content.strip() == "":
-        await message.channel.send(
-            f"❌ {user.mention} Tin nhắn trống không thể dịch!",
-            delete_after=5
-        )
+        await message.channel.send(f"❌ {user.mention} Empty message!", delete_after=5)
         return
     
     if len(message.content) > 3000:
-        await message.channel.send(
-            f"❌ {user.mention} Tin nhắn quá dài! (Tối đa 3000 ký tự)",
-            delete_after=5
-        )
+        await message.channel.send(f"❌ {user.mention} Message too long!", delete_after=5)
         return
     
     settings = get_server_settings(message.guild.id)
@@ -189,10 +120,7 @@ async def on_reaction_add(reaction, user):
         result = await translate_text(message.content, target_lang)
         
         if not result:
-            await message.channel.send(
-                f"❌ {user.mention} Lỗi dịch! Tất cả APIs đang bận.",
-                delete_after=5
-            )
+            await message.channel.send(f"❌ {user.mention} Translation failed!", delete_after=5)
             return
         
         embed = discord.Embed(
@@ -203,58 +131,35 @@ async def on_reaction_add(reaction, user):
         )
         
         if len(message.content) <= 400:
-            embed.add_field(
-                name="📝 Original",
-                value=f"```{message.content}```",
-                inline=False
-            )
+            embed.add_field(name="📝 Original", value=f"```{message.content}```", inline=False)
         
         footer_text = f"Requested by {user.name}"
         if settings["auto_delete"]:
             footer_text += f" • Deletes in {settings['delete_time']}s"
         
-        embed.set_footer(
-            text=footer_text,
-            icon_url=user.display_avatar.url
-        )
+        embed.set_footer(text=footer_text, icon_url=user.display_avatar.url)
         
-        translation_msg = await message.channel.send(
-            f"💬 {user.mention}",
-            embed=embed
-        )
-        
+        translation_msg = await message.channel.send(f"💬 {user.mention}", embed=embed)
         settings["total_translations"] += 1
         
         if settings["auto_delete"]:
             await asyncio.sleep(settings["delete_time"])
             try:
                 await translation_msg.delete()
-            except discord.NotFound:
+            except:
                 pass
-            except discord.Forbidden:
-                print("⚠️ Không có quyền xóa tin nhắn")
 
-# ===============================================
-# COMMANDS (giữ nguyên như bản cũ)
-# ===============================================
+# COMMANDS
 @bot.command(name='translate', aliases=['tr', 't'])
 async def translate_command(ctx, lang: str = None, *, text: str = None):
     if not lang or not text:
-        await ctx.send(
-            "❌ **Usage:** `!translate <language> <text>`\n"
-            "**Example:** `!translate vi Hello world`"
-        )
-        return
-    
-    if len(text) > 3000:
-        await ctx.send("❌ Văn bản quá dài! (Max 3000 ký tự)")
+        await ctx.send("❌ **Usage:** `!translate <lang> <text>`\n**Example:** `!translate vi Hello`")
         return
     
     async with ctx.typing():
         result = await translate_text(text, lang)
-        
         if not result:
-            await ctx.send("❌ Lỗi dịch!")
+            await ctx.send("❌ Translation failed!")
             return
         
         embed = discord.Embed(
@@ -263,7 +168,6 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
             color=discord.Color.green(),
             timestamp=datetime.utcnow()
         )
-        
         if len(text) <= 400:
             embed.add_field(name="📝 Original", value=f"```{text}```", inline=False)
         
@@ -283,14 +187,12 @@ async def auto_delete_toggle(ctx, mode: str = None):
         )
         return
     
-    if mode.lower() in ['on', 'enable', '1', 'yes']:
+    if mode.lower() in ['on', 'enable', '1']:
         settings["auto_delete"] = True
-        await ctx.send(f"✅ Auto-delete: **ON** ({settings['delete_time']}s)")
-    elif mode.lower() in ['off', 'disable', '0', 'no']:
+        await ctx.send(f"✅ Auto-delete: ON ({settings['delete_time']}s)")
+    elif mode.lower() in ['off', 'disable', '0']:
         settings["auto_delete"] = False
-        await ctx.send("✅ Auto-delete: **OFF**")
-    else:
-        await ctx.send("❌ Use: `!autodelete on/off`")
+        await ctx.send("✅ Auto-delete: OFF")
 
 @bot.command(name='deletetime', aliases=['dt'])
 @commands.has_permissions(manage_messages=True)
@@ -298,43 +200,51 @@ async def delete_time(ctx, seconds: int = None):
     settings = get_server_settings(ctx.guild.id)
     
     if seconds is None:
-        await ctx.send(
-            f"⏱️ **Current:** {settings['delete_time']}s\n"
-            f"**Use:** `!deletetime <seconds>`"
-        )
+        await ctx.send(f"⏱️ **Current:** {settings['delete_time']}s")
         return
     
-    if seconds < 5 or seconds > 600:
+    if 5 <= seconds <= 600:
+        settings["delete_time"] = seconds
+        await ctx.send(f"✅ Delete time: {seconds}s")
+    else:
         await ctx.send("❌ Range: 5-600 seconds")
-        return
-    
-    settings["delete_time"] = seconds
-    await ctx.send(f"✅ Delete time: **{seconds}s**")
 
 @bot.command(name='flags', aliases=['languages'])
 async def flags_list(ctx):
     embed = discord.Embed(
         title=f"🌍 Supported Flags ({len(FLAG_TO_LANG)} languages)",
-        description="React với flag để dịch tin nhắn!",
+        description="React with flag emoji to translate!",
         color=discord.Color.purple()
     )
     
-    # Chia thành 3 cột
     flags = list(FLAG_TO_LANG.items())
     col_size = len(flags) // 3
     
-    col1 = "\n".join([f"{e} `{c}`" for e, c in flags[:col_size]])
-    col2 = "\n".join([f"{e} `{c}`" for e, c in flags[col_size:col_size*2]])
-    col3 = "\n".join([f"{e} `{c}`" for e, c in flags[col_size*2:]])
+    for i in range(3):
+        start = i * col_size
+        end = start + col_size if i < 2 else len(flags)
+        col = flags[start:end]
+        if col:
+            value = "\n".join([f"{e} `{c}`" for e, c in col])
+            embed.add_field(name=f"Col {i+1}", value=value, inline=True)
     
-    if col1: embed.add_field(name="1️⃣", value=col1, inline=True)
-    if col2: embed.add_field(name="2️⃣", value=col2, inline=True)
-    if col3: embed.add_field(name="3️⃣", value=col3, inline=True)
+    await ctx.send(embed=embed)
+
+@bot.command(name='settings')
+async def view_settings(ctx):
+    settings = get_server_settings(ctx.guild.id)
+    
+    embed = discord.Embed(title="⚙️ Server Settings", color=discord.Color.gold())
+    embed.add_field(name="🗑️ Auto-delete", value="✅ ON" if settings["auto_delete"] else "❌ OFF", inline=True)
+    embed.add_field(name="⏱️ Delete time", value=f"{settings['delete_time']}s", inline=True)
+    embed.add_field(name="📊 Translations", value=str(settings['total_translations']), inline=True)
     
     await ctx.send(embed=embed)
 
 @bot.command(name='help', aliases=['h'])
 async def help_command(ctx):
+    settings = get_server_settings(ctx.guild.id)
+    
     embed = discord.Embed(
         title="🤖 Translation Bot Help",
         description=f"Support {len(FLAG_TO_LANG)} languages!",
@@ -348,37 +258,26 @@ async def help_command(ctx):
     )
     
     embed.add_field(
-        name="Commands",
+        name="⌨️ Commands",
         value=(
-            "`!translate <code> <text>` - Manual translate\n"
+            "`!translate <lang> <text>` - Manual translate\n"
             "`!flags` - List all flags\n"
             "`!autodelete on/off` - Toggle auto-delete\n"
-            "`!deletetime <sec>` - Set delete timer\n"
+            "`!deletetime <sec>` - Set delete time\n"
             "`!settings` - View settings"
         ),
         inline=False
     )
     
-    await ctx.send(embed=embed)
-
-@bot.command(name='settings')
-async def view_settings(ctx):
-    settings = get_server_settings(ctx.guild.id)
-    
-    embed = discord.Embed(
-        title=f"⚙️ Server Settings",
-        color=discord.Color.gold()
+    embed.add_field(
+        name="⚙️ Current Settings",
+        value=(
+            f"**Auto-delete:** {'✅ ON' if settings['auto_delete'] else '❌ OFF'}\n"
+            f"**Delete after:** {settings['delete_time']}s\n"
+            f"**Translations:** {settings['total_translations']}"
+        ),
+        inline=False
     )
-    
-    embed.add_field(name="🗑️ Auto-delete", 
-                    value="✅ ON" if settings["auto_delete"] else "❌ OFF", 
-                    inline=True)
-    embed.add_field(name="⏱️ Delete time", 
-                    value=f"{settings['delete_time']}s", 
-                    inline=True)
-    embed.add_field(name="📊 Translations", 
-                    value=f"{settings['total_translations']}", 
-                    inline=True)
     
     await ctx.send(embed=embed)
 
@@ -387,9 +286,9 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument! Use `!help`")
+        await ctx.send("❌ Missing argument! Use `!help`")
     elif isinstance(error, commands.MissingPermissions):
-        await ctx.send(f"❌ No permission! (Need: Manage Messages)")
+        await ctx.send("❌ No permission! (Need: Manage Messages)")
     else:
         print(f"Error: {error}")
 
@@ -399,29 +298,21 @@ async def on_close():
     if session:
         await session.close()
 
-# ===============================================
-# MAIN - CHẠY BOT
-# ===============================================
+# MAIN
 if __name__ == "__main__":
-    # Bật keep-alive nếu có (cho Replit/Render)
     if KEEP_ALIVE_AVAILABLE:
         keep_alive()
     
-    # Lấy token
     TOKEN = os.getenv("DISCORD_TOKEN")
     
     if not TOKEN:
         print("=" * 70)
         print("❌ DISCORD_TOKEN not found!")
-        print("Setup:")
-        print("1. Replit: Add to Secrets")
-        print("2. Render: Add to Environment Variables")
-        print("3. Local: export DISCORD_TOKEN='your_token'")
+        print("Add DISCORD_TOKEN to Environment Variables")
         print("=" * 70)
         exit(1)
     
-    print("🚀 Starting Discord Translation Bot...")
-    print("🌐 Using LibreTranslate API (multi-instance fallback)")
+    print("🚀 Starting bot...")
     
     try:
         bot.run(TOKEN)
