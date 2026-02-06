@@ -28,7 +28,8 @@ intents.guilds = True
 bot = commands.Bot(
     command_prefix='!',
     intents=intents,
-    max_messages=1000,  # Giảm memory footprint
+    help_command=None,  # Disable default help command
+    max_messages=1000,
     chunk_guilds_at_startup=False
 )
 
@@ -45,11 +46,9 @@ class RateLimiter:
         now = time.time()
         queue = self.requests[key]
         
-        # Xóa requests cũ
         while queue and queue[0] < now - self.window:
             queue.popleft()
         
-        # Kiểm tra limit
         if len(queue) >= self.max_requests:
             return False
         
@@ -66,10 +65,9 @@ class RateLimiter:
         oldest = queue[0]
         return max(0, self.window - (now - oldest))
 
-# Rate limiters
-user_limiter = RateLimiter(max_requests=10, window=60)  # 10 req/min per user
-guild_limiter = RateLimiter(max_requests=50, window=60)  # 50 req/min per guild
-global_limiter = RateLimiter(max_requests=200, window=60)  # 200 req/min global
+user_limiter = RateLimiter(max_requests=10, window=60)
+guild_limiter = RateLimiter(max_requests=50, window=60)
+global_limiter = RateLimiter(max_requests=200, window=60)
 
 # ===============================================
 # TRANSLATION CACHE
@@ -91,7 +89,6 @@ class TranslationCache:
         if key not in self.cache:
             return None
         
-        # Check TTL
         if time.time() - self.access_times[key] > self.ttl:
             del self.cache[key]
             del self.access_times[key]
@@ -102,7 +99,6 @@ class TranslationCache:
     
     def set(self, text, target_lang, result):
         if len(self.cache) >= self.max_size:
-            # Xóa entry cũ nhất
             oldest_key = min(self.access_times, key=self.access_times.get)
             del self.cache[oldest_key]
             del self.access_times[oldest_key]
@@ -161,11 +157,9 @@ class Debouncer:
         self.pending = {}
     
     async def debounce(self, key, coro):
-        # Cancel pending task
         if key in self.pending:
             self.pending[key].cancel()
         
-        # Create new task
         async def delayed():
             await asyncio.sleep(self.delay)
             await coro
@@ -204,7 +198,6 @@ class CircuitBreaker:
         if api_url not in self.open_circuits:
             return True
         
-        # Auto-reset after timeout
         if time.time() - self.last_failure[api_url] > self.timeout:
             self.open_circuits.remove(api_url)
             self.failures[api_url] = 0
@@ -267,7 +260,6 @@ FLAG_TO_LANG = {
 async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
-    # Check cache first
     cached = cache.get(text, target_lang)
     if cached:
         return cached
@@ -283,7 +275,6 @@ async def translate_text(text: str, target_lang: str, source_lang: str = 'auto')
         "format": "text"
     }
     
-    # Try APIs with circuit breaker
     for api_url in FALLBACK_APIS:
         if not circuit_breaker.can_request(api_url):
             continue
@@ -297,13 +288,11 @@ async def translate_text(text: str, target_lang: str, source_lang: str = 'auto')
                         'source': source_lang if source_lang != 'auto' else 'auto'
                     }
                     
-                    # Cache result
                     cache.set(text, target_lang, result)
                     circuit_breaker.record_success(api_url)
                     
                     return result
                 elif response.status == 429:
-                    # Rate limited
                     circuit_breaker.record_failure(api_url)
                     await asyncio.sleep(2)
                     continue
@@ -335,7 +324,6 @@ async def on_ready():
         print('✅ Keep-Alive: ENABLED')
     print('=' * 70)
     
-    # Start queue workers
     await translation_queue.start_workers()
     
     await bot.change_presence(
@@ -357,7 +345,6 @@ async def on_reaction_add(reaction, user):
     
     message = reaction.message
     
-    # Validation
     if not message.content or message.content.strip() == "":
         return
     
@@ -373,7 +360,6 @@ async def on_reaction_add(reaction, user):
         )
         return
     
-    # Rate limiting checks
     user_key = f"user:{user.id}"
     guild_key = f"guild:{message.guild.id}"
     
@@ -386,13 +372,11 @@ async def on_reaction_add(reaction, user):
         return
     
     if not guild_limiter.can_request(guild_key):
-        wait = guild_limiter.get_wait_time(guild_key)
-        return  # Silent fail for guild limit
+        return
     
     if not global_limiter.can_request("global"):
-        return  # Silent fail for global limit
+        return
     
-    # Debounced translation
     debounce_key = f"{message.id}:{emoji}:{user.id}"
     
     async def process_translation():
@@ -459,7 +443,6 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         await ctx.send(f"❌ Text too long! (Max {settings['max_length']})")
         return
     
-    # Rate limiting
     user_key = f"user:{ctx.author.id}"
     if not user_limiter.can_request(user_key):
         wait = user_limiter.get_wait_time(user_key)
