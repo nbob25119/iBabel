@@ -581,7 +581,228 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         # Reply trực tiếp vào tin nhắn lệnh
         await ctx.message.reply(embed=embed, mention_author=False)
 
-# Các command khác giữ nguyên (autodelete, deletetime, v.v.) vì không ảnh hưởng
+@bot.command(name='autodelete', aliases=['ad'])
+@commands.has_permissions(manage_messages=True)
+async def auto_delete_toggle(ctx, mode: str = None):
+    settings = get_server_settings(ctx.guild.id)
+    
+    if mode is None:
+        status = "✅ ON" if settings["auto_delete"] else "❌ OFF"
+        await ctx.send(
+            f"**Auto-delete:** {status}\n"
+            f"**Delete after:** {settings['delete_time']}s\n"
+            f"Use: `!autodelete on/off`"
+        )
+        return
+    
+    if mode.lower() in ['on', 'enable', '1', 'yes']:
+        settings["auto_delete"] = True
+        await ctx.send(f"✅ Auto-delete: **ON** ({settings['delete_time']}s)")
+    elif mode.lower() in ['off', 'disable', '0', 'no']:
+        settings["auto_delete"] = False
+        await ctx.send("✅ Auto-delete: **OFF**")
+    else:
+        await ctx.send("❌ Use: `!autodelete on/off`")
+
+@bot.command(name='deletetime', aliases=['dt'])
+@commands.has_permissions(manage_messages=True)
+async def delete_time(ctx, seconds: int = None):
+    settings = get_server_settings(ctx.guild.id)
+    
+    if seconds is None:
+        await ctx.send(
+            f"⏱️ **Current:** {settings['delete_time']}s\n"
+            f"**Use:** `!deletetime <seconds>`"
+        )
+        return
+    
+    if seconds < 5 or seconds > 600:
+        await ctx.send("❌ Range: 5-600 seconds")
+        return
+    
+    settings["delete_time"] = seconds
+    await ctx.send(f"✅ Delete time: **{seconds}s**")
+
+@bot.command(name='maxlength')
+@commands.has_permissions(manage_guild=True)
+async def max_length(ctx, length: int = None):
+    settings = get_server_settings(ctx.guild.id)
+    
+    if length is None:
+        await ctx.send(f"📏 Current max: **{settings['max_length']}** chars")
+        return
+    
+    if length < 100 or length > 2000:
+        await ctx.send("❌ Range: 100-2000")
+        return
+    
+    settings["max_length"] = length
+    await ctx.send(f"✅ Max length: **{length}** chars")
+
+@bot.command(name='toggle')
+@commands.has_permissions(manage_guild=True)
+async def toggle_bot(ctx, mode: str = None):
+    settings = get_server_settings(ctx.guild.id)
+    
+    if mode is None:
+        status = "✅ ENABLED" if settings["enabled"] else "❌ DISABLED"
+        await ctx.send(f"Bot status: {status}")
+        return
+    
+    if mode.lower() in ['on', 'enable']:
+        settings["enabled"] = True
+        await ctx.send("✅ Bot: **ENABLED**")
+    elif mode.lower() in ['off', 'disable']:
+        settings["enabled"] = False
+        await ctx.send("❌ Bot: **DISABLED**")
+
+@bot.command(name='flags', aliases=['languages'])
+async def flags_list(ctx):
+    embed = discord.Embed(
+        title=f"🌍 Supported Flags ({len(FLAG_TO_LANG)} languages)",
+        description="React with flag to translate!",
+        color=discord.Color.purple()
+    )
+    
+    flags = list(FLAG_TO_LANG.items())
+    col_size = len(flags) // 3
+    
+    col1 = "\n".join([f"{e} `{c}`" for e, c in flags[:col_size]])
+    col2 = "\n".join([f"{e} `{c}`" for e, c in flags[col_size:col_size*2]])
+    col3 = "\n".join([f"{e} `{c}`" for e, c in flags[col_size*2:]])
+    
+    if col1: embed.add_field(name="Asia & Europe", value=col1, inline=True)
+    if col2: embed.add_field(name="Americas", value=col2, inline=True)
+    if col3: embed.add_field(name="Others", value=col3, inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='help', aliases=['h'])
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="🤖 Translation Bot Help",
+        description=f"Free APIs • {len(FLAG_TO_LANG)} languages • 24/7 uptime",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="🌐 Auto Translation",
+        value="React with flag (🇻🇳 🇺🇸 🇯🇵...) to translate message!",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚡ Commands",
+        value=(
+            "`!translate <code> <text>` - Manual translate\n"
+            "`!flags` - List all flags\n"
+            "`!stats` - View statistics\n"
+            "`!settings` - View settings"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔧 Admin Commands",
+        value=(
+            "`!autodelete on/off` - Toggle auto-delete\n"
+            "`!deletetime <sec>` - Set delete timer\n"
+            "`!maxlength <chars>` - Set max text length\n"
+            "`!toggle on/off` - Enable/disable bot"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚡ Rate Limits",
+        value="10 translations/min per user\n50 translations/min per server",
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='settings')
+async def view_settings(ctx):
+    settings = get_server_settings(ctx.guild.id)
+    
+    embed = discord.Embed(
+        title=f"⚙️ Server Settings",
+        color=discord.Color.gold()
+    )
+    
+    embed.add_field(name="🔌 Status", 
+                    value="✅ ON" if settings["enabled"] else "❌ OFF", 
+                    inline=True)
+    embed.add_field(name="🗑️ Auto-delete", 
+                    value="✅ ON" if settings["auto_delete"] else "❌ OFF", 
+                    inline=True)
+    embed.add_field(name="⏱️ Delete time", 
+                    value=f"{settings['delete_time']}s", 
+                    inline=True)
+    embed.add_field(name="📏 Max length", 
+                    value=f"{settings['max_length']} chars", 
+                    inline=True)
+    embed.add_field(name="📊 Translations", 
+                    value=f"{settings['total_translations']}", 
+                    inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='stats')
+async def stats_command(ctx):
+    settings = get_server_settings(ctx.guild.id)
+    
+    embed = discord.Embed(
+        title="📊 Bot Statistics",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(name="🌐 Languages", value=len(FLAG_TO_LANG), inline=True)
+    embed.add_field(name="💾 Cache size", value=len(cache.cache), inline=True)
+    embed.add_field(name="📝 Queue", value=translation_queue.queue.qsize(), inline=True)
+    embed.add_field(name="⚡ Processing", value=translation_queue.processing, inline=True)
+    embed.add_field(name="📊 Server translations", value=settings['total_translations'], inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='apitest')
+async def api_test(ctx):
+    """Test all translation APIs"""
+    test_text = "Hello world"
+    test_lang = "vi"
+    
+    embed = discord.Embed(
+        title="🔧 API Status Test",
+        description=f"Testing: '{test_text}' → {test_lang}",
+        color=discord.Color.orange()
+    )
+    
+    async with ctx.typing():
+        # Test MyMemory
+        result1 = await translate_mymemory(test_text, test_lang)
+        status1 = "✅ OK" if result1 else "❌ FAIL"
+        
+        # Test Lingva
+        result2 = await translate_lingva(test_text, test_lang)
+        status2 = "✅ OK" if result2 else "❌ FAIL"
+        
+        # Test LibreTranslate
+        result3 = await translate_libretranslate(test_text, test_lang)
+        status3 = "✅ OK" if result3 else "❌ FAIL"
+        
+        # Test SimplyTranslate
+        result4 = await translate_simplytranslate(test_text, test_lang)
+        status4 = "✅ OK" if result4 else "❌ FAIL"
+        
+        embed.add_field(name="MyMemory", value=status1, inline=True)
+        embed.add_field(name="Lingva", value=status2, inline=True)
+        embed.add_field(name="LibreTranslate", value=status3, inline=True)
+        embed.add_field(name="SimplyTranslate", value=status4, inline=True)
+        
+        working_count = sum([bool(r) for r in [result1, result2, result3, result4]])
+        embed.set_footer(text=f"Working APIs: {working_count}/4")
+        
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_command_error(ctx, error):
