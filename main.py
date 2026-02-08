@@ -388,6 +388,7 @@ async def translate_text(text: str, target_lang: str, source_lang: str = 'auto')
 # ===============================================
 last_discord_request = 0
 discord_request_lock = asyncio.Lock()
+bot_ready = False  # Flag to prevent processing before startup delay
 
 async def safe_discord_request(coro):
     """Enforce minimum 2 second delay between any Discord API calls"""
@@ -444,6 +445,8 @@ FLAG_TO_LANG = {
 # ===============================================
 @bot.event
 async def on_ready():
+    global bot_ready
+    
     print('=' * 70)
     print(f'✅ Bot: {bot.user.name} ONLINE!')
     print(f'🆔 ID: {bot.user.id}')
@@ -454,7 +457,11 @@ async def on_ready():
     print(f'⚡ Multi-API: MyMemory + Lingva + LibreTranslate + SimplyTranslate')
     if KEEP_ALIVE_AVAILABLE:
         print('✅ Keep-Alive: ENABLED')
+    print(f'⏳ Startup delay: 30 seconds to avoid rate limit...')
     print('=' * 70)
+    
+    # Wait 30 seconds before processing any requests to avoid startup spam
+    await asyncio.sleep(30)
     
     await translation_queue.start_workers()
     
@@ -464,10 +471,17 @@ async def on_ready():
             name=f"{len(FLAG_TO_LANG)} flags 🌐 | !help"
         )
     )
+    
+    bot_ready = True
+    print('✅ Bot ready to process translations!')
 
 @bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
+        return
+    
+    # Wait for bot to finish startup delay
+    if not bot_ready:
         return
     
     emoji = str(reaction.emoji)
@@ -506,43 +520,43 @@ async def on_reaction_add(reaction, user):
         # Removed typing indicator to reduce API calls
         target_lang = FLAG_TO_LANG[emoji]
         result = await translate_text(message.content, target_lang)
-            
-            if not result:
-                return  # Silent fail
-            
-            embed = discord.Embed(
-                description=result['text'][:4000],
-                color=discord.Color.blue()
-            )
-            
-            embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
-            
-            # Retry logic for Discord API with global rate limiting
-            for attempt in range(3):
+        
+        if not result:
+            return  # Silent fail
+        
+        embed = discord.Embed(
+            description=result['text'][:4000],
+            color=discord.Color.blue()
+        )
+        
+        embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
+        
+        # Retry logic for Discord API with global rate limiting
+        for attempt in range(3):
+            try:
+                translation_msg = await safe_discord_request(
+                    message.channel.send(embed=embed)
+                )
+                settings["total_translations"] += 1
+                
+                # Auto-delete after 30 seconds
+                await asyncio.sleep(30)
                 try:
-                    translation_msg = await safe_discord_request(
-                        message.channel.send(embed=embed)
-                    )
-                    settings["total_translations"] += 1
-                    
-                    # Auto-delete after 30 seconds
-                    await asyncio.sleep(30)
-                    try:
-                        await safe_discord_request(translation_msg.delete())
-                    except:
-                        pass
+                    await safe_discord_request(translation_msg.delete())
+                except:
+                    pass
+                break
+            except discord.HTTPException as e:
+                if "429" in str(e) or "1015" in str(e):
+                    wait_time = (2 ** attempt) * 10  # Exponential backoff: 10s, 20s, 40s
+                    print(f"⚠️ Rate limited, waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"Discord API error: {e}")
                     break
-                except discord.HTTPException as e:
-                    if "429" in str(e) or "1015" in str(e):
-                        wait_time = (2 ** attempt) * 10  # Exponential backoff: 10s, 20s, 40s
-                        print(f"⚠️ Rate limited, waiting {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        print(f"Discord API error: {e}")
-                        break
-                except Exception as e:
-                    print(f"Error sending message: {e}")
-                    break
+            except Exception as e:
+                print(f"Error sending message: {e}")
+                break
     
     await debouncer.debounce(debounce_key, process_translation())
 
