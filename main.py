@@ -1,4 +1,4 @@
-import discord
+import discord 
 from discord.ext import commands
 import asyncio
 import aiohttp
@@ -26,12 +26,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.guilds = True
+intents.members = False
 bot = commands.Bot(
     command_prefix='!',
     intents=intents,
     help_command=None,
-    max_messages=300,  # Giảm thêm để tiết kiệm RAM trên free tier
-    chunk_guilds_at_startup=False
+    max_messages=500,
+    chunk_guilds_at_startup=False,
+    case_insensitive=True
 )
 
 # ===============================================
@@ -74,7 +76,7 @@ global_limiter = RateLimiter(max_requests=200, window=60)
 # TRANSLATION CACHE
 # ===============================================
 class TranslationCache:
-    def __init__(self, max_size=500, ttl=1800):  # Giảm ttl để tiết kiệm RAM
+    def __init__(self, max_size=500, ttl=3600):
         self.cache = {}
         self.access_times = {}
         self.max_size = max_size
@@ -114,7 +116,7 @@ cache = TranslationCache()
 # REQUEST QUEUE
 # ===============================================
 class TranslationQueue:
-    def __init__(self, max_concurrent=3):  # Giữ 3 để an toàn, tăng lên 4 nếu cần
+    def __init__(self, max_concurrent=3):
         self.queue = asyncio.Queue()
         self.processing = 0
         self.max_concurrent = max_concurrent
@@ -214,7 +216,6 @@ circuit_breaker = CircuitBreaker()
 # ===============================================
 session = None
 
-# MyMemory API - Free, stable, no API key needed
 async def translate_mymemory(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
@@ -238,7 +239,6 @@ async def translate_mymemory(text: str, target_lang: str, source_lang: str = 'au
         print(f"MyMemory error: {e}")
     return None
 
-# LibreTranslate - Multiple free instances
 async def translate_libretranslate(text: str, target_lang: str, source_lang: str = 'auto', instance_url: str = None):
     global session
     
@@ -282,7 +282,6 @@ async def translate_libretranslate(text: str, target_lang: str, source_lang: str
     
     return None
 
-# Lingva Translate - Free, no API key
 async def translate_lingva(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
@@ -313,7 +312,6 @@ async def translate_lingva(text: str, target_lang: str, source_lang: str = 'auto
     
     return None
 
-# SimplyTranslate - Free alternative
 async def translate_simplytranslate(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
@@ -348,22 +346,18 @@ async def translate_simplytranslate(text: str, target_lang: str, source_lang: st
     
     return None
 
-# Main translation function with cascading fallbacks
 async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
-    # Check cache first
     cached = cache.get(text, target_lang)
     if cached:
         return cached
     
-    # Initialize session if needed
     if session is None:
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
         session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     
-    # Try APIs in order of reliability
     translation_functions = [
         translate_mymemory,
         translate_lingva,
@@ -444,13 +438,15 @@ async def on_ready():
             name=f"{len(FLAG_TO_LANG)} flags 🌐 | !help"
         )
     )
+
+# CRITICAL FIX: Add on_message event to process commands
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
     
-    # Task loop để monitor 24/7 (print queue size mỗi 5p)
-    async def monitor_loop():
-        while True:
-            print(f"📊 Queue size: {translation_queue.queue.qsize()} | Processing: {translation_queue.processing}")
-            await asyncio.sleep(300)  # 5 phút
-    asyncio.create_task(monitor_loop())
+    # Process commands
+    await bot.process_commands(message)
 
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -505,26 +501,19 @@ async def on_reaction_add(reaction, user):
             
             if not result:
                 await message.channel.send(
-                    f"❌ {user.mention} Translation failed! All APIs unavailable. Please try again.",
+                    f"❌ {user.mention} Translation failed! Please try again.",
                     delete_after=8
                 )
                 return
             
             embed = discord.Embed(
-                description=result['text'][:4000],  # Chỉ show bản dịch
-                color=discord.Color.blue(),
-                timestamp=datetime.utcnow()
+                description=result['text'][:4000],
+                color=discord.Color.blue()
             )
-            embed.set_author(name=f"{emoji} → {target_lang.upper()}")  # Tiêu đề gọn đẹp
             
-            footer_text = f"By {user.name} • API: {result.get('api', 'Unknown')}"
-            if settings["auto_delete"]:
-                footer_text += f" • ⏱️ {settings['delete_time']}s"
+            embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
             
-            embed.set_footer(text=footer_text, icon_url=user.display_avatar.url)
-            
-            # Reply trực tiếp vào message gốc
-            translation_msg = await message.reply(embed=embed, mention_author=False)
+            translation_msg = await message.channel.send(embed=embed)
             
             settings["total_translations"] += 1
             
@@ -566,20 +555,17 @@ async def translate_command(ctx, lang: str = None, *, text: str = None):
         result = await translate_text(text, lang)
         
         if not result:
-            await ctx.send("❌ Translation failed! All APIs unavailable.")
+            await ctx.send("❌ Translation failed!")
             return
         
         embed = discord.Embed(
-            description=result['text'][:4000],  # Chỉ show bản dịch
-            color=discord.Color.green(),
-            timestamp=datetime.utcnow()
+            description=result['text'][:4000],
+            color=discord.Color.green()
         )
-        embed.set_author(name=f"🌐 → {lang.upper()}")  # Tiêu đề gọn
         
-        embed.set_footer(text=f"API: {result.get('api', 'Unknown')}")
+        embed.set_footer(text=f"{ctx.author.name}", icon_url=ctx.author.display_avatar.url)
         
-        # Reply trực tiếp vào tin nhắn lệnh
-        await ctx.message.reply(embed=embed, mention_author=False)
+        await ctx.send(embed=embed)
 
 @bot.command(name='autodelete', aliases=['ad'])
 @commands.has_permissions(manage_messages=True)
@@ -778,19 +764,15 @@ async def api_test(ctx):
     )
     
     async with ctx.typing():
-        # Test MyMemory
         result1 = await translate_mymemory(test_text, test_lang)
         status1 = "✅ OK" if result1 else "❌ FAIL"
         
-        # Test Lingva
         result2 = await translate_lingva(test_text, test_lang)
         status2 = "✅ OK" if result2 else "❌ FAIL"
         
-        # Test LibreTranslate
         result3 = await translate_libretranslate(test_text, test_lang)
         status3 = "✅ OK" if result3 else "❌ FAIL"
         
-        # Test SimplyTranslate
         result4 = await translate_simplytranslate(test_text, test_lang)
         status4 = "✅ OK" if result4 else "❌ FAIL"
         
@@ -804,6 +786,12 @@ async def api_test(ctx):
         
     await ctx.send(embed=embed)
 
+@bot.command(name='ping')
+async def ping_command(ctx):
+    """Check if bot is responsive"""
+    latency = round(bot.latency * 1000)
+    await ctx.send(f"🏓 Pong! Latency: {latency}ms")
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
@@ -815,7 +803,9 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send(f"❌ No permission!", delete_after=5)
     else:
-        print(f"Error: {error}")
+        print(f"Command error: {error}")
+        import traceback
+        traceback.print_exc()
 
 @bot.event
 async def on_close():
@@ -842,6 +832,7 @@ if __name__ == "__main__":
     print("⚡ Multi-API: MyMemory + Lingva + LibreTranslate + SimplyTranslate")
     print("🔒 Protection: Rate limiting + Queue + Cache + Circuit Breaker")
     print("💾 Optimized for 512MB RAM")
+    print("🔧 Command Fix: Added on_message event handler")
     
     try:
         bot.run(TOKEN)
@@ -849,3 +840,5 @@ if __name__ == "__main__":
         print("❌ Invalid token!")
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
