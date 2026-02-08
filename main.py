@@ -66,9 +66,9 @@ class RateLimiter:
         oldest = queue[0]
         return max(0, self.window - (now - oldest))
 
-user_limiter = RateLimiter(max_requests=5, window=60)  # 5 per minute
-guild_limiter = RateLimiter(max_requests=20, window=60)  # 20 per minute
-global_limiter = RateLimiter(max_requests=50, window=60)  # 50 per minute total
+user_limiter = RateLimiter(max_requests=3, window=60)  # 3 per minute
+guild_limiter = RateLimiter(max_requests=10, window=60)  # 10 per minute
+global_limiter = RateLimiter(max_requests=20, window=60)  # 20 per minute total
 
 # ===============================================
 # TRANSLATION CACHE
@@ -147,13 +147,13 @@ class TranslationQueue:
             for _ in range(self.max_concurrent):
                 asyncio.create_task(self.worker())
 
-translation_queue = TranslationQueue(max_concurrent=3)
+translation_queue = TranslationQueue(max_concurrent=1)
 
 # ===============================================
 # DEBOUNCING
 # ===============================================
 class Debouncer:
-    def __init__(self, delay=2.0):
+    def __init__(self, delay=5.0):  # Increased to 5 seconds
         self.delay = delay
         self.pending = {}
     
@@ -384,6 +384,28 @@ async def translate_text(text: str, target_lang: str, source_lang: str = 'auto')
     return None
 
 # ===============================================
+# GLOBAL REQUEST TRACKING
+# ===============================================
+last_discord_request = 0
+discord_request_lock = asyncio.Lock()
+
+async def safe_discord_request(coro):
+    """Enforce minimum 2 second delay between any Discord API calls"""
+    global last_discord_request
+    
+    async with discord_request_lock:
+        now = time.time()
+        time_since_last = now - last_discord_request
+        
+        if time_since_last < 2.0:  # Minimum 2 seconds between requests
+            wait_time = 2.0 - time_since_last
+            await asyncio.sleep(wait_time)
+        
+        result = await coro
+        last_discord_request = time.time()
+        return result
+
+# ===============================================
 # SERVER SETTINGS
 # ===============================================
 server_settings = {}
@@ -481,9 +503,9 @@ async def on_reaction_add(reaction, user):
     debounce_key = f"{message.id}:{emoji}:{user.id}"
     
     async def process_translation():
-        async with message.channel.typing():
-            target_lang = FLAG_TO_LANG[emoji]
-            result = await translate_text(message.content, target_lang)
+        # Removed typing indicator to reduce API calls
+        target_lang = FLAG_TO_LANG[emoji]
+        result = await translate_text(message.content, target_lang)
             
             if not result:
                 return  # Silent fail
@@ -495,22 +517,24 @@ async def on_reaction_add(reaction, user):
             
             embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
             
-            # Retry logic for Discord API
+            # Retry logic for Discord API with global rate limiting
             for attempt in range(3):
                 try:
-                    translation_msg = await message.channel.send(embed=embed)
+                    translation_msg = await safe_discord_request(
+                        message.channel.send(embed=embed)
+                    )
                     settings["total_translations"] += 1
                     
                     # Auto-delete after 30 seconds
                     await asyncio.sleep(30)
                     try:
-                        await translation_msg.delete()
+                        await safe_discord_request(translation_msg.delete())
                     except:
                         pass
                     break
                 except discord.HTTPException as e:
-                    if "429" in str(e):
-                        wait_time = (2 ** attempt) * 2  # Exponential backoff: 2s, 4s, 8s
+                    if "429" in str(e) or "1015" in str(e):
+                        wait_time = (2 ** attempt) * 10  # Exponential backoff: 10s, 20s, 40s
                         print(f"⚠️ Rate limited, waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
                     else:
@@ -615,7 +639,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="⚡ Giới hạn",
-        value="5 lần/phút mỗi user • 20 lần/phút mỗi server",
+        value="3 lần/phút mỗi user • 10 lần/phút mỗi server",
         inline=False
     )
     
