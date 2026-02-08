@@ -26,14 +26,12 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.guilds = True
-intents.members = False
 bot = commands.Bot(
     command_prefix='!',
     intents=intents,
     help_command=None,
-    max_messages=500,
-    chunk_guilds_at_startup=False,
-    case_insensitive=True
+    max_messages=500,  # Reduced for free tier
+    chunk_guilds_at_startup=False
 )
 
 # ===============================================
@@ -68,15 +66,15 @@ class RateLimiter:
         oldest = queue[0]
         return max(0, self.window - (now - oldest))
 
-user_limiter = RateLimiter(max_requests=10, window=60)
-guild_limiter = RateLimiter(max_requests=50, window=60)
-global_limiter = RateLimiter(max_requests=200, window=60)
+user_limiter = RateLimiter(max_requests=5, window=60)  # 5 per minute
+guild_limiter = RateLimiter(max_requests=20, window=60)  # 20 per minute
+global_limiter = RateLimiter(max_requests=50, window=60)  # 50 per minute total
 
 # ===============================================
 # TRANSLATION CACHE
 # ===============================================
 class TranslationCache:
-    def __init__(self, max_size=500, ttl=3600):
+    def __init__(self, max_size=500, ttl=3600):  # Reduced for free tier
         self.cache = {}
         self.access_times = {}
         self.max_size = max_size
@@ -116,7 +114,7 @@ cache = TranslationCache()
 # REQUEST QUEUE
 # ===============================================
 class TranslationQueue:
-    def __init__(self, max_concurrent=3):
+    def __init__(self, max_concurrent=3):  # Reduced for free tier
         self.queue = asyncio.Queue()
         self.processing = 0
         self.max_concurrent = max_concurrent
@@ -171,13 +169,13 @@ class Debouncer:
         
         self.pending[key] = asyncio.create_task(delayed())
 
-debouncer = Debouncer(delay=1.5)
+debouncer = Debouncer(delay=3.0)
 
 # ===============================================
 # CIRCUIT BREAKER
 # ===============================================
 class CircuitBreaker:
-    def __init__(self, failure_threshold=3, timeout=30):
+    def __init__(self, failure_threshold=3, timeout=30):  # More aggressive for free APIs
         self.failure_threshold = failure_threshold
         self.timeout = timeout
         self.failures = defaultdict(int)
@@ -216,13 +214,14 @@ circuit_breaker = CircuitBreaker()
 # ===============================================
 session = None
 
+# MyMemory API - Free, stable, no API key needed
 async def translate_mymemory(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
     try:
         url = "https://api.mymemory.translated.net/get"
         params = {
-            "q": text[:500],
+            "q": text[:500],  # Limit to 500 chars
             "langpair": f"{source_lang}|{target_lang}"
         }
         
@@ -239,6 +238,7 @@ async def translate_mymemory(text: str, target_lang: str, source_lang: str = 'au
         print(f"MyMemory error: {e}")
     return None
 
+# LibreTranslate - Multiple free instances
 async def translate_libretranslate(text: str, target_lang: str, source_lang: str = 'auto', instance_url: str = None):
     global session
     
@@ -282,6 +282,7 @@ async def translate_libretranslate(text: str, target_lang: str, source_lang: str
     
     return None
 
+# Lingva Translate - Free, no API key
 async def translate_lingva(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
@@ -312,6 +313,7 @@ async def translate_lingva(text: str, target_lang: str, source_lang: str = 'auto
     
     return None
 
+# SimplytTranslate - Free alternative
 async def translate_simplytranslate(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
@@ -346,18 +348,22 @@ async def translate_simplytranslate(text: str, target_lang: str, source_lang: st
     
     return None
 
+# Main translation function with cascading fallbacks
 async def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
     global session
     
+    # Check cache first
     cached = cache.get(text, target_lang)
     if cached:
         return cached
     
+    # Initialize session if needed
     if session is None:
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
         session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     
+    # Try APIs in order of reliability
     translation_functions = [
         translate_mymemory,
         translate_lingva,
@@ -385,8 +391,6 @@ server_settings = {}
 def get_server_settings(guild_id):
     if guild_id not in server_settings:
         server_settings[guild_id] = {
-            "auto_delete": True,
-            "delete_time": 30,
             "total_translations": 0,
             "enabled": True,
             "max_length": 1000
@@ -439,15 +443,6 @@ async def on_ready():
         )
     )
 
-# CRITICAL FIX: Add on_message event to process commands
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    
-    # Process commands
-    await bot.process_commands(message)
-
 @bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
@@ -469,22 +464,13 @@ async def on_reaction_add(reaction, user):
         return
     
     if len(message.content) > settings["max_length"]:
-        await message.channel.send(
-            f"❌ {user.mention} Text too long! (Max {settings['max_length']})",
-            delete_after=5
-        )
-        return
+        return  # Silent fail to avoid rate limit
     
     user_key = f"user:{user.id}"
     guild_key = f"guild:{message.guild.id}"
     
     if not user_limiter.can_request(user_key):
-        wait = user_limiter.get_wait_time(user_key)
-        await message.channel.send(
-            f"⏱️ {user.mention} Slow down! Wait {int(wait)}s",
-            delete_after=5
-        )
-        return
+        return  # Silent fail
     
     if not guild_limiter.can_request(guild_key):
         return
@@ -500,11 +486,7 @@ async def on_reaction_add(reaction, user):
             result = await translate_text(message.content, target_lang)
             
             if not result:
-                await message.channel.send(
-                    f"❌ {user.mention} Translation failed! Please try again.",
-                    delete_after=8
-                )
-                return
+                return  # Silent fail
             
             embed = discord.Embed(
                 description=result['text'][:4000],
@@ -513,101 +495,36 @@ async def on_reaction_add(reaction, user):
             
             embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
             
-            translation_msg = await message.channel.send(embed=embed)
-            
-            settings["total_translations"] += 1
-            
-            if settings["auto_delete"]:
-                await asyncio.sleep(settings["delete_time"])
+            # Retry logic for Discord API
+            for attempt in range(3):
                 try:
-                    await translation_msg.delete()
-                except:
-                    pass
+                    translation_msg = await message.channel.send(embed=embed)
+                    settings["total_translations"] += 1
+                    
+                    # Auto-delete after 30 seconds
+                    await asyncio.sleep(30)
+                    try:
+                        await translation_msg.delete()
+                    except:
+                        pass
+                    break
+                except discord.HTTPException as e:
+                    if "429" in str(e):
+                        wait_time = (2 ** attempt) * 2  # Exponential backoff: 2s, 4s, 8s
+                        print(f"⚠️ Rate limited, waiting {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        print(f"Discord API error: {e}")
+                        break
+                except Exception as e:
+                    print(f"Error sending message: {e}")
+                    break
     
     await debouncer.debounce(debounce_key, process_translation())
 
 # ===============================================
-# COMMANDS
+# COMMANDS (ADMIN ONLY - NO TRANSLATION COMMANDS)
 # ===============================================
-@bot.command(name='translate', aliases=['tr', 't'])
-@commands.cooldown(1, 3, commands.BucketType.user)
-async def translate_command(ctx, lang: str = None, *, text: str = None):
-    if not lang or not text:
-        await ctx.send(
-            "❌ **Usage:** `!translate <language> <text>`\n"
-            "**Example:** `!translate vi Hello world`"
-        )
-        return
-    
-    settings = get_server_settings(ctx.guild.id)
-    
-    if len(text) > settings["max_length"]:
-        await ctx.send(f"❌ Text too long! (Max {settings['max_length']})")
-        return
-    
-    user_key = f"user:{ctx.author.id}"
-    if not user_limiter.can_request(user_key):
-        wait = user_limiter.get_wait_time(user_key)
-        await ctx.send(f"⏱️ Slow down! Wait {int(wait)}s")
-        return
-    
-    async with ctx.typing():
-        result = await translate_text(text, lang)
-        
-        if not result:
-            await ctx.send("❌ Translation failed!")
-            return
-        
-        embed = discord.Embed(
-            description=result['text'][:4000],
-            color=discord.Color.green()
-        )
-        
-        embed.set_footer(text=f"{ctx.author.name}", icon_url=ctx.author.display_avatar.url)
-        
-        await ctx.send(embed=embed)
-
-@bot.command(name='autodelete', aliases=['ad'])
-@commands.has_permissions(manage_messages=True)
-async def auto_delete_toggle(ctx, mode: str = None):
-    settings = get_server_settings(ctx.guild.id)
-    
-    if mode is None:
-        status = "✅ ON" if settings["auto_delete"] else "❌ OFF"
-        await ctx.send(
-            f"**Auto-delete:** {status}\n"
-            f"**Delete after:** {settings['delete_time']}s\n"
-            f"Use: `!autodelete on/off`"
-        )
-        return
-    
-    if mode.lower() in ['on', 'enable', '1', 'yes']:
-        settings["auto_delete"] = True
-        await ctx.send(f"✅ Auto-delete: **ON** ({settings['delete_time']}s)")
-    elif mode.lower() in ['off', 'disable', '0', 'no']:
-        settings["auto_delete"] = False
-        await ctx.send("✅ Auto-delete: **OFF**")
-    else:
-        await ctx.send("❌ Use: `!autodelete on/off`")
-
-@bot.command(name='deletetime', aliases=['dt'])
-@commands.has_permissions(manage_messages=True)
-async def delete_time(ctx, seconds: int = None):
-    settings = get_server_settings(ctx.guild.id)
-    
-    if seconds is None:
-        await ctx.send(
-            f"⏱️ **Current:** {settings['delete_time']}s\n"
-            f"**Use:** `!deletetime <seconds>`"
-        )
-        return
-    
-    if seconds < 5 or seconds > 600:
-        await ctx.send("❌ Range: 5-600 seconds")
-        return
-    
-    settings["delete_time"] = seconds
-    await ctx.send(f"✅ Delete time: **{seconds}s**")
 
 @bot.command(name='maxlength')
 @commands.has_permissions(manage_guild=True)
@@ -666,42 +583,39 @@ async def flags_list(ctx):
 @bot.command(name='help', aliases=['h'])
 async def help_command(ctx):
     embed = discord.Embed(
-        title="🤖 Translation Bot Help",
-        description=f"Free APIs • {len(FLAG_TO_LANG)} languages • 24/7 uptime",
+        title="🤖 Translation Bot",
+        description=f"React emoji để dịch • Auto-delete sau 30s",
         color=discord.Color.blue()
     )
     
     embed.add_field(
-        name="🌐 Auto Translation",
-        value="React with flag (🇻🇳 🇺🇸 🇯🇵...) to translate message!",
+        name="🌐 Cách dùng",
+        value="React flag emoji (🇻🇳 🇺🇸 🇯🇵...) vào tin nhắn để dịch!",
         inline=False
     )
     
     embed.add_field(
         name="⚡ Commands",
         value=(
-            "`!translate <code> <text>` - Manual translate\n"
-            "`!flags` - List all flags\n"
-            "`!stats` - View statistics\n"
-            "`!settings` - View settings"
+            "`!flags` - Xem tất cả flag\n"
+            "`!stats` - Thống kê\n"
+            "`!settings` - Cài đặt server"
         ),
         inline=False
     )
     
     embed.add_field(
-        name="🔧 Admin Commands",
+        name="🔧 Admin",
         value=(
-            "`!autodelete on/off` - Toggle auto-delete\n"
-            "`!deletetime <sec>` - Set delete timer\n"
-            "`!maxlength <chars>` - Set max text length\n"
-            "`!toggle on/off` - Enable/disable bot"
+            "`!toggle on/off` - Bật/tắt bot\n"
+            "`!maxlength <số>` - Giới hạn độ dài"
         ),
         inline=False
     )
     
     embed.add_field(
-        name="⚡ Rate Limits",
-        value="10 translations/min per user\n50 translations/min per server",
+        name="⚡ Giới hạn",
+        value="5 lần/phút mỗi user • 20 lần/phút mỗi server",
         inline=False
     )
     
@@ -712,24 +626,21 @@ async def view_settings(ctx):
     settings = get_server_settings(ctx.guild.id)
     
     embed = discord.Embed(
-        title=f"⚙️ Server Settings",
+        title=f"⚙️ Cài đặt Server",
         color=discord.Color.gold()
     )
     
-    embed.add_field(name="🔌 Status", 
-                    value="✅ ON" if settings["enabled"] else "❌ OFF", 
+    embed.add_field(name="🔌 Trạng thái", 
+                    value="✅ BẬT" if settings["enabled"] else "❌ TẮT", 
                     inline=True)
     embed.add_field(name="🗑️ Auto-delete", 
-                    value="✅ ON" if settings["auto_delete"] else "❌ OFF", 
+                    value="30 giây (cố định)", 
                     inline=True)
-    embed.add_field(name="⏱️ Delete time", 
-                    value=f"{settings['delete_time']}s", 
+    embed.add_field(name="📏 Độ dài tối đa", 
+                    value=f"{settings['max_length']} ký tự", 
                     inline=True)
-    embed.add_field(name="📏 Max length", 
-                    value=f"{settings['max_length']} chars", 
-                    inline=True)
-    embed.add_field(name="📊 Translations", 
-                    value=f"{settings['total_translations']}", 
+    embed.add_field(name="📊 Đã dịch", 
+                    value=f"{settings['total_translations']} lần", 
                     inline=True)
     
     await ctx.send(embed=embed)
@@ -764,15 +675,19 @@ async def api_test(ctx):
     )
     
     async with ctx.typing():
+        # Test MyMemory
         result1 = await translate_mymemory(test_text, test_lang)
         status1 = "✅ OK" if result1 else "❌ FAIL"
         
+        # Test Lingva
         result2 = await translate_lingva(test_text, test_lang)
         status2 = "✅ OK" if result2 else "❌ FAIL"
         
+        # Test LibreTranslate
         result3 = await translate_libretranslate(test_text, test_lang)
         status3 = "✅ OK" if result3 else "❌ FAIL"
         
+        # Test SimplyTranslate
         result4 = await translate_simplytranslate(test_text, test_lang)
         status4 = "✅ OK" if result4 else "❌ FAIL"
         
@@ -786,26 +701,22 @@ async def api_test(ctx):
         
     await ctx.send(embed=embed)
 
-@bot.command(name='ping')
-async def ping_command(ctx):
-    """Check if bot is responsive"""
-    latency = round(bot.latency * 1000)
-    await ctx.send(f"🏓 Pong! Latency: {latency}ms")
-
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     elif isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(f"⏱️ Cooldown! Wait {error.retry_after:.1f}s", delete_after=5)
+        return  # Silent fail to avoid more API calls
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument! Use `!help`", delete_after=5)
+        return  # Silent fail
     elif isinstance(error, commands.MissingPermissions):
-        await ctx.send(f"❌ No permission!", delete_after=5)
+        return  # Silent fail
+    elif "429" in str(error) or "Too Many Requests" in str(error):
+        print(f"⚠️ Discord Rate Limited! Backing off...")
+        await asyncio.sleep(10)  # Wait 10 seconds
+        return
     else:
-        print(f"Command error: {error}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {error}")
 
 @bot.event
 async def on_close():
@@ -832,7 +743,6 @@ if __name__ == "__main__":
     print("⚡ Multi-API: MyMemory + Lingva + LibreTranslate + SimplyTranslate")
     print("🔒 Protection: Rate limiting + Queue + Cache + Circuit Breaker")
     print("💾 Optimized for 512MB RAM")
-    print("🔧 Command Fix: Added on_message event handler")
     
     try:
         bot.run(TOKEN)
@@ -840,5 +750,3 @@ if __name__ == "__main__":
         print("❌ Invalid token!")
     except Exception as e:
         print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
