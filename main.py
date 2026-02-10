@@ -622,22 +622,22 @@ async def flags_list(ctx):
 async def help_command(ctx):
     embed = discord.Embed(
         title="🤖 Translation Bot",
-        description=f"React emoji để dịch • Auto-delete sau 30s",
+        description=f"React emoji to translate • Auto-delete after 30s",
         color=discord.Color.blue()
     )
     
     embed.add_field(
-        name="🌐 Cách dùng",
-        value="React flag emoji (🇻🇳 🇺🇸 🇯🇵...) vào tin nhắn để dịch!",
+        name="🌐 How to use",
+        value="React flag emoji (🇻🇳 🇺🇸 🇯🇵...) to translate message!",
         inline=False
     )
     
     embed.add_field(
         name="⚡ Commands",
         value=(
-            "`!flags` - Xem tất cả flag\n"
-            "`!stats` - Thống kê\n"
-            "`!settings` - Cài đặt server"
+            "`!flags` - View all flags\n"
+            "`!stats` - Statistics\n"
+            "`!settings` - Server settings"
         ),
         inline=False
     )
@@ -645,15 +645,15 @@ async def help_command(ctx):
     embed.add_field(
         name="🔧 Admin",
         value=(
-            "`!toggle on/off` - Bật/tắt bot\n"
-            "`!maxlength <số>` - Giới hạn độ dài"
+            "`!toggle on/off` - Enable/disable bot\n"
+            "`!maxlength <number>` - Set max length"
         ),
         inline=False
     )
     
     embed.add_field(
-        name="⚡ Giới hạn",
-        value="3 lần/phút mỗi user • 10 lần/phút mỗi server",
+        name="⚡ Limits",
+        value="3 times/min per user • 10 times/min per server",
         inline=False
     )
     
@@ -664,21 +664,21 @@ async def view_settings(ctx):
     settings = get_server_settings(ctx.guild.id)
     
     embed = discord.Embed(
-        title=f"⚙️ Cài đặt Server",
+        title=f"⚙️ Server Settings",
         color=discord.Color.gold()
     )
     
-    embed.add_field(name="🔌 Trạng thái", 
-                    value="✅ BẬT" if settings["enabled"] else "❌ TẮT", 
+    embed.add_field(name="🔌 Status", 
+                    value="✅ ON" if settings["enabled"] else "❌ OFF", 
                     inline=True)
     embed.add_field(name="🗑️ Auto-delete", 
-                    value="30 giây (cố định)", 
+                    value="30 sec (fixed)", 
                     inline=True)
-    embed.add_field(name="📏 Độ dài tối đa", 
-                    value=f"{settings['max_length']} ký tự", 
+    embed.add_field(name="📏 Max length", 
+                    value=f"{settings['max_length']} chars", 
                     inline=True)
-    embed.add_field(name="📊 Đã dịch", 
-                    value=f"{settings['total_translations']} lần", 
+    embed.add_field(name="📊 Translated", 
+                    value=f"{settings['total_translations']} times", 
                     inline=True)
     
     await ctx.send(embed=embed)
