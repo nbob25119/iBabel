@@ -529,13 +529,16 @@ async def on_reaction_add(reaction, user):
             color=discord.Color.blue()
         )
         
-        embed.set_footer(text=f"{user.name}", icon_url=user.display_avatar.url)
+        embed.set_footer(
+            text=f"{emoji} → {target_lang.upper()} • {user.name}",
+            icon_url=user.display_avatar.url
+        )
         
         # Retry logic for Discord API with global rate limiting
         for attempt in range(3):
             try:
                 translation_msg = await safe_discord_request(
-                    message.channel.send(embed=embed)
+                    message.reply(embed=embed, mention_author=False)  # Reply to original message
                 )
                 settings["total_translations"] += 1
                 
